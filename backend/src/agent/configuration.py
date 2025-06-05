@@ -14,6 +14,20 @@ class Configuration(BaseModel):
             "description": "The name of the language model to use for the agent's query generation."
         },
     )
+    
+    http_proxy: Optional[str] = Field(
+        default=None,
+        metadata={
+            "description": "HTTP proxy configuration for API calls (format: protocol://host:port)"
+        },
+    )
+    
+    https_proxy: Optional[str] = Field(
+        default=None,
+        metadata={
+            "description": "HTTPS proxy configuration for API calls (format: protocol://host:port)"
+        },
+    )
 
     reflection_model: str = Field(
         default="gemini-2.5-flash-preview-04-17",
