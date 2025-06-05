@@ -37,6 +37,8 @@ if os.getenv("GEMINI_API_KEY") is None:
     raise ValueError("GEMINI_API_KEY is not set")
 
 # Used for Google Search API
+# Note: Google GenAI Client will automatically use system proxy settings
+# from HTTP_PROXY and HTTPS_PROXY environment variables
 genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 

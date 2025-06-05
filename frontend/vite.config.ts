@@ -9,14 +9,13 @@ export default defineConfig({
   base: "/app/",
   resolve: {
     alias: {
-      "@": path.resolve(new URL(".", import.meta.url).pathname, "./src"),
+      "@": path.resolve(__dirname, "./src"),
     },
-  },
-  server: {
+  },  server: {
     proxy: {
       // Proxy API requests to the backend server
       "/api": {
-        target: "http://127.0.0.1:8000", // Default backend address
+        target: "http://127.0.0.1:2024", // LangGraph backend address
         changeOrigin: true,
         // Optionally rewrite path if needed (e.g., remove /api prefix if backend doesn't expect it)
         // rewrite: (path) => path.replace(/^\/api/, ''),

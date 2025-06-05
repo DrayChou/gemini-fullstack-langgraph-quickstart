@@ -12,7 +12,7 @@ services:
   langgraph-postgres:
     image: docker.io/postgres:16
     ports:
-      - "5433:5432"
+      - "16543:5432"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -28,7 +28,7 @@ services:
   langgraph-api:
     image: gemini-fullstack-langgraph
     ports:
-      - "8123:8000"
+      - "16812:8000"
     depends_on:
       langgraph-redis:
         condition: service_healthy
