@@ -1,5 +1,3 @@
-import os
-
 from agent.tools_and_schemas import SearchQueryList, Reflection
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -7,7 +5,6 @@ from langgraph.types import Send
 from langgraph.graph import StateGraph
 from langgraph.graph import START, END
 from langchain_core.runnables import RunnableConfig
-from google.genai import Client
 
 from agent.state import (
     OverallState,
@@ -23,51 +20,45 @@ from agent.prompts import (
     reflection_instructions,
     answer_instructions,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
 from agent.utils import (
-    get_citations,
     get_research_topic,
-    insert_citation_markers,
-    resolve_urls,
 )
+from agent.llm_factory import LLMFactory
+from agent.search_factory import SearchFactory
 
 load_dotenv()
-
-if os.getenv("GEMINI_API_KEY") is None:
-    raise ValueError("GEMINI_API_KEY is not set")
-
-# Used for Google Search API
-# Note: Google GenAI Client will automatically use system proxy settings
-# from HTTP_PROXY and HTTPS_PROXY environment variables
-genai_client = Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 
 # Nodes
 def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerationState:
-    """LangGraph node that generates a search queries based on the User's question.
+    """Generate search queries based on the User's question.
 
-    Uses Gemini 2.0 Flash to create an optimized search query for web research based on
-    the User's question.
+    Uses the configured LLM provider to create optimized search queries.
 
     Args:
         state: Current graph state containing the User's question
-        config: Configuration for the runnable, including LLM provider settings
+        config: Configuration for the runnable
 
     Returns:
-        Dictionary with state update, including search_query key containing the generated query
+        Dictionary with state update, including generated queries
     """
     configurable = Configuration.from_runnable_config(config)
 
-    # check for custom initial search query count
+    # Validate API key for the selected provider
+    if not LLMFactory.validate_api_key(configurable.api_provider):
+        required_key = LLMFactory.get_required_api_key(configurable.api_provider)
+        raise ValueError(f"{required_key} is not set")
+
+    # Check for custom initial search query count
     if state.get("initial_search_query_count") is None:
         state["initial_search_query_count"] = configurable.number_of_initial_queries
 
-    # init Gemini 2.0 Flash
-    llm = ChatGoogleGenerativeAI(
-        model=configurable.query_generator_model,
+    # Create LLM using factory
+    llm = LLMFactory.create_llm(
+        config=configurable,
+        model_type="query_generator_model",
         temperature=1.0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
     structured_llm = llm.with_structured_output(SearchQueryList)
 
@@ -78,6 +69,7 @@ def generate_query(state: OverallState, config: RunnableConfig) -> QueryGenerati
         research_topic=get_research_topic(state["messages"]),
         number_queries=state["initial_search_query_count"],
     )
+    
     # Generate the search queries
     result = structured_llm.invoke(formatted_prompt)
     return {"query_list": result.query}
@@ -95,68 +87,88 @@ def continue_to_web_research(state: QueryGenerationState):
 
 
 def web_research(state: WebSearchState, config: RunnableConfig) -> OverallState:
-    """LangGraph node that performs web research using the native Google Search API tool.
+    """Perform web research using the configured search method.
 
-    Executes a web search using the native Google Search API tool in combination with Gemini 2.0 Flash.
+    Executes a web search and generates a summary of the results.
 
     Args:
-        state: Current graph state containing the search query and research loop count
-        config: Configuration for the runnable, including search API settings
+        state: Current graph state containing the search query
+        config: Configuration for the runnable
 
     Returns:
-        Dictionary with state update, including sources_gathered, research_loop_count, and web_research_results
+        Dictionary with state update, including sources and research results
     """
-    # Configure
     configurable = Configuration.from_runnable_config(config)
-    formatted_prompt = web_searcher_instructions.format(
-        current_date=get_current_date(),
-        research_topic=state["search_query"],
+    
+    # Create search client and perform search
+    search_client = SearchFactory.create_search_client(configurable)
+    search_results, initial_summary = SearchFactory.perform_search(
+        state["search_query"],
+        configurable,
+        search_client,
+        num_results=5
     )
-
-    # Uses the google genai client as the langchain client doesn't return grounding metadata
-    response = genai_client.models.generate_content(
-        model=configurable.query_generator_model,
-        contents=formatted_prompt,
-        config={
-            "tools": [{"google_search": {}}],
-            "temperature": 0,
-        },
-    )
-    # resolve the urls to short urls for saving tokens and time
-    resolved_urls = resolve_urls(
-        response.candidates[0].grounding_metadata.grounding_chunks, state["id"]
-    )
-    # Gets the citations and adds them to the generated text
-    citations = get_citations(response, resolved_urls)
-    modified_text = insert_citation_markers(response.text, citations)
-    sources_gathered = [item for citation in citations for item in citation["segments"]]
-
+    
+    # If we have a summary from Google search, use it, otherwise generate one
+    if initial_summary:
+        research_summary = initial_summary
+    else:
+        # Create a summary using the configured LLM
+        formatted_prompt = web_searcher_instructions.format(
+            current_date=get_current_date(),
+            research_topic=state["search_query"],
+        ) + f"\n\nSearch Results:\n{SearchFactory._duckduckgo_search(state['search_query'], 5)[1]}"
+        
+        llm = LLMFactory.create_llm(
+            config=configurable,
+            model_type="query_generator_model",
+            temperature=0.0,
+            max_retries=2,
+        )
+        
+        # Generate response based on search results
+        if hasattr(llm, '_generate'):
+            response = llm._generate([AIMessage(content=formatted_prompt)])
+            research_summary = response.generations[0].message.content
+        else:
+            # For Gemini models using invoke method
+            research_summary = llm.invoke(formatted_prompt).content
+    
+    # Create simplified source references
+    sources_gathered = []
+    for i, result in enumerate(search_results):
+        short_url = f"https://ref.ai/id/{state['id']}-{i}"
+        sources_gathered.append({
+            "label": result.get("title", f"Source {i+1}"),
+            "short_url": short_url,
+            "value": result.get("url", "")
+        })
+    
     return {
         "sources_gathered": sources_gathered,
         "search_query": [state["search_query"]],
-        "web_research_result": [modified_text],
+        "web_research_result": [research_summary],
     }
 
 
 def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
-    """LangGraph node that identifies knowledge gaps and generates potential follow-up queries.
+    """Identify knowledge gaps and generate follow-up queries.
 
-    Analyzes the current summary to identify areas for further research and generates
-    potential follow-up queries. Uses structured output to extract
+    Analyzes current research to identify areas for further research and
+    generates potential follow-up queries. Uses structured output to extract
     the follow-up query in JSON format.
 
     Args:
-        state: Current graph state containing the running summary and research topic
-        config: Configuration for the runnable, including LLM provider settings
+        state: Current graph state containing research results
+        config: Configuration for the runnable
 
     Returns:
-        Dictionary with state update, including search_query key containing the generated follow-up query
+        Dictionary with state update, including follow-up queries
     """
     configurable = Configuration.from_runnable_config(config)
-    # Increment the research loop count and get the reasoning model
+    # Increment the research loop count
     state["research_loop_count"] = state.get("research_loop_count", 0) + 1
-    reasoning_model = state.get("reasoning_model") or configurable.reasoning_model
-
+    
     # Format the prompt
     current_date = get_current_date()
     formatted_prompt = reflection_instructions.format(
@@ -164,12 +176,13 @@ def reflection(state: OverallState, config: RunnableConfig) -> ReflectionState:
         research_topic=get_research_topic(state["messages"]),
         summaries="\n\n---\n\n".join(state["web_research_result"]),
     )
-    # init Reasoning Model
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
+    
+    # Create reasoning model using factory
+    llm = LLMFactory.create_llm(
+        config=configurable,
+        model_type="reflection_model",
         temperature=1.0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
     result = llm.with_structured_output(Reflection).invoke(formatted_prompt)
 
@@ -220,20 +233,18 @@ def evaluate_research(
 
 
 def finalize_answer(state: OverallState, config: RunnableConfig):
-    """LangGraph node that finalizes the research summary.
+    """Finalize the research answer.
 
-    Prepares the final output by deduplicating and formatting sources, then
-    combining them with the running summary to create a well-structured
-    research report with proper citations.
+    Prepares the final output by formatting sources and combining them
+    with the research results to create a well-structured response.
 
     Args:
-        state: Current graph state containing the running summary and sources gathered
+        state: Current graph state containing research results and sources
 
     Returns:
-        Dictionary with state update, including running_summary key containing the formatted final summary with sources
+        Dictionary with state update, including final answer and sources
     """
     configurable = Configuration.from_runnable_config(config)
-    reasoning_model = state.get("reasoning_model") or configurable.reasoning_model
 
     # Format the prompt
     current_date = get_current_date()
@@ -243,26 +254,40 @@ def finalize_answer(state: OverallState, config: RunnableConfig):
         summaries="\n---\n\n".join(state["web_research_result"]),
     )
 
-    # init Reasoning Model, default to Gemini 2.5 Flash
-    llm = ChatGoogleGenerativeAI(
-        model=reasoning_model,
+    # Create answer model using factory
+    llm = LLMFactory.create_llm(
+        config=configurable,
+        model_type="answer_model",
         temperature=0,
         max_retries=2,
-        api_key=os.getenv("GEMINI_API_KEY"),
     )
-    result = llm.invoke(formatted_prompt)
+    
+    # Generate the final answer
+    if hasattr(llm, '_generate'):
+        # For custom OpenAI adapter
+        response = llm._generate([AIMessage(content=formatted_prompt)])
+        result_content = response.generations[0].message.content
+    else:
+        # For Gemini models
+        response = llm.invoke(formatted_prompt)
+        result_content = response.content
 
-    # Replace the short urls with the original urls and add all used urls to the sources_gathered
+    # Replace the short urls with the original urls and track used sources
     unique_sources = []
     for source in state["sources_gathered"]:
-        if source["short_url"] in result.content:
-            result.content = result.content.replace(
+        if source["short_url"] in result_content:
+            result_content = result_content.replace(
                 source["short_url"], source["value"]
             )
             unique_sources.append(source)
 
     return {
-        "messages": [AIMessage(content=result.content)],
+        "messages": [AIMessage(content=result_content)],
+        "sources_gathered": unique_sources,
+    }
+
+    return {
+        "messages": [AIMessage(content=result_content)],
         "sources_gathered": unique_sources,
     }
 

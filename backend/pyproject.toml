@@ -12,12 +12,16 @@ dependencies = [
     "langgraph>=0.2.6",
     "langchain>=0.3.19",
     "langchain-google-genai",
+    "langchain-openai",
+    "openai>=1.0.0",
     "python-dotenv>=1.0.1",
     "langgraph-sdk>=0.1.57",
     "langgraph-cli",
     "langgraph-api",
     "fastapi",
+    "uvicorn",
     "google-genai",
+    "duckduckgo-search",
 ]
 
 

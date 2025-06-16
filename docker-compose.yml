@@ -12,7 +12,7 @@ services:
   langgraph-postgres:
     image: docker.io/postgres:16
     ports:
-      - "16543:5432"
+      - "8122:5432"
     environment:
       POSTGRES_DB: postgres
       POSTGRES_USER: postgres
@@ -28,14 +28,23 @@ services:
   langgraph-api:
     image: gemini-fullstack-langgraph
     ports:
-      - "16812:8000"
+      - "8123:8000"
     depends_on:
       langgraph-redis:
         condition: service_healthy
       langgraph-postgres:
         condition: service_healthy
     environment:
-      GEMINI_API_KEY: ${GEMINI_API_KEY}
-      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY}
+      # API Provider Selection (gemini or openai)
+      API_PROVIDER: gemini
+      
+      # API Keys (set the one corresponding to your API_PROVIDER choice)
+      GEMINI_API_KEY: your-gemini-api-key-here
+      # OPENAI_API_KEY: your-openai-api-key-here
+      
+      # Other settings
+      LANGSMITH_API_KEY: your-langsmith-api-key-here
+      HTTP_PROXY: http://host.docker.internal:7893
+      HTTPS_PROXY: http://host.docker.internal:7893
       REDIS_URI: redis://langgraph-redis:6379
       POSTGRES_URI: postgres://postgres:postgres@langgraph-postgres:5432/postgres?sslmode=disable
